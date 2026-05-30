@@ -1,11 +1,12 @@
-[  {
+[
+  {
     "kernelSource": {
-      "name": "miku-KernelSU",
-      "repo": "https://github.com/PhamtomK12/kernel_xiaomi_odin",
-      "branch": "TDA",
-      "device": "odin"
+      "name": "Arayz79",
+      "repo": "https://github.com/RyuujiX/android_kernel_asus_sdm660",
+      "branch": "11.0",
+      "device": "x00td"
     },
-    "withKernelSU": true,
+    "withKernelSU": false,
     "toolchains": [
       {
         "repo": "https://android.googlesource.com/platform/prebuilts/gas/linux-x86",
@@ -13,7 +14,7 @@
         "name": "gas"
       },
       {
-        "repo": "https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone/",
+        "repo": "https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone",
         "branch": "11",
         "name": "clang"
       }
