@@ -42,9 +42,6 @@ jobs:
       kernelDevice: ${{ matrix.repos.kernelSource.device }}
       DEFCONFIG_NAME: ${{ matrix.repos.kernelSource.device }}_defconfig
       withKernelSU: ${{ matrix.repos.withKernelSU }}
-      AK3_REPO: ${{ matrix.repos.AnyKernel3.repo }}
-      AK3_BRANCH: ${{ matrix.repos.AnyKernel3.branch }}
-      OUT_DIR: "out"
 
     steps:
       - name: "Create working dir"
@@ -148,21 +145,36 @@ jobs:
         run: |
           echo "PATH Variable: $PATH"
           make ${args}
-
-      - name: "Build Image.gz-dtb"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
-        run: |
-          echo "PATH Variable: $PATH"
           make ${args} Image.gz-dtb
-          echo "=== Image.gz-dtb built ==="
-          ls -la ./${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb
+
+      - name: "Upload Image"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image(${{ env.kernelDevice }}-${{ env.kernelName }})
+          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: "Upload Image.gz"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz(${{ env.kernelDevice }}-${{ env.kernelName }})
+          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: "Upload Image.gz-dtb"
+        uses: actions/upload-artifact@v4
+        with:
+          name: Image.gz-dtb(${{ env.kernelDevice }}-${{ env.kernelName }})
+          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: "Package AnyKernel3"
         run: |
-          git clone --depth=1 ${{ env.AK3_REPO }} -b ${{ env.AK3_BRANCH }} AK3
-          cp ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb AK3/
+          git clone --depth=1 https://github.com/RyuujiX/AnyKernel3 -b master AK3
+          cp ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb AK3/
           cd AK3 && zip -r9 ../kernel-${{ env.kernelDevice }}.zip . -x ".git*"
 
       - name: "Upload AnyKernel3 zip"
@@ -173,35 +185,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: "Upload Image"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload Image.gz"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload Image.gz-dtb"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz-dtb(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb
-          if-no-files-found: ignore
-          retention-days: 7
-
       - name: "Upload dtb"
         uses: actions/upload-artifact@v4
         with:
           name: dtb(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dts/qcom/*.dtb
+          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtb
           if-no-files-found: ignore
           retention-days: 7
 
@@ -209,6 +197,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dtbo.img(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img
+          path: ./${{ env.kernelDir }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img
           if-no-files-found: ignore
           retention-days: 7
