@@ -157,12 +157,12 @@ jobs:
           echo "PATH Variable: $PATH"
           make ${args} Image.gz-dtb
           echo "=== Image.gz-dtb built ==="
-          ls -la ./${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb 2>/dev/null || ls -la ./arch/${{ env.ARCH }}/boot/Image.gz-dtb
+          ls -la ./${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb
 
       - name: "Package AnyKernel3"
         run: |
           git clone --depth=1 ${{ env.AK3_REPO }} -b ${{ env.AK3_BRANCH }} AK3
-          cp ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb AK3/ 2>/dev/null || cp ./${{ env.kernelDir }}/${{ env.kernelName }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb AK3/
+          cp ./${{ env.kernelDir }}/${{ env.kernelName }}/${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb AK3/
           cd AK3 && zip -r9 ../kernel-${{ env.kernelDevice }}.zip . -x ".git*"
 
       - name: "Upload AnyKernel3 zip"
