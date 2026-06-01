@@ -13,8 +13,8 @@ on:
         type: choice
         options:
           - 'SEMUA'
-          - 'Project-Infinity'
-          - 'RyujinK'
+          - 'Project-Infinity4.4'
+          - 'Skywalker4.4'
 
 jobs:
   Set-repos:
