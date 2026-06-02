@@ -7,16 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       pilihan_kernel:
-        description: 'Pilih Kernel yang Mau Di-build'
+        description: 'Ketik nama kernel. Contoh: ElectroPerf, Project-Infinity-10, SkyWalker-r7'
         required: true
-        default: 'SEMUA'
-        type: choice
-        options:
-          - 'SEMUA'
-          - 'Project-Infinity-10'
-          - 'Project-Infinity-11'
-          - 'Project-Infinity-11LV'
-          - 'SkyWalker-r7'
+        default: 'SkyWalker-r7/HMP'
+        type: string
 
 jobs:
   Set-repos:
@@ -28,21 +22,30 @@ jobs:
       - name: "Checkout"
         uses: actions/checkout@v4
 
+      - name: "List available kernels"
+        id: list-kernels
+        run: |
+          echo "=== Kernel yang tersedia di repos.json ==="
+          cat ${{ env.CONFIGURATION }} | jq -r '.[].kernelSource.name'
+          echo "=========================================="
+
       - name: "Generate Matrix"
         id: generate-matrix
         run: |
-          # Jika milih SEMUA, biarkan membaca seluruh isi repos.json
-          if [ "${{ github.event.inputs.pilihan_kernel }}" = "SEMUA" ]; then
-            echo "repos<<EOF" >> $GITHUB_OUTPUT
-            cat ${{ env.CONFIGURATION }} >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          else
-            # Jika milih salah satu, filter isi json berdasarkan nama kernel yang dipilih
-            echo "repos<<EOF" >> $GITHUB_OUTPUT
-            cat ${{ env.CONFIGURATION }} | jq '[.[] | select(.kernelSource.name == "${{ github.event.inputs.pilihan_kernel }}")]' >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
-          fi
+          INPUT="${{ github.event.inputs.pilihan_kernel }}"
 
+          # Cek apakah nama kernel ada di repos.json
+          FOUND=$(cat ${{ env.CONFIGURATION }} | jq --arg name "$INPUT" '[.[] | select(.kernelSource.name == $name)] | length')
+          if [ "$FOUND" -eq 0 ]; then
+            echo "❌ ERROR: Kernel '$INPUT' tidak ditemukan di repos.json!"
+            echo "📋 Kernel yang tersedia:"
+            cat ${{ env.CONFIGURATION }} | jq -r '.[].kernelSource.name' | sed 's/^/   - /'
+            exit 1
+          fi
+          echo "✅ Kernel '$INPUT' ditemukan, mulai build..."
+          echo "repos<<EOF" >> $GITHUB_OUTPUT
+          cat ${{ env.CONFIGURATION }} | jq --arg name "$INPUT" '[.[] | select(.kernelSource.name == $name)]' >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
   Build-Kernel:
     name: "Build kernel"
@@ -217,3 +220,4 @@ jobs:
           path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/dtbo.img
           if-no-files-found: ignore
           retention-days: 7
+
