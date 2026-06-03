@@ -9,7 +9,7 @@ on:
       pilihan_kernel:
         description: 'Ketik nama kernel. Contoh: ElectroPerf, Project-Infinity-10, SkyWalker-r7'
         required: true
-        default: 'SkyWalker-r7/HMP'
+        default: 'SkyWalker-r7-HMP'
         type: string
 
 jobs:
