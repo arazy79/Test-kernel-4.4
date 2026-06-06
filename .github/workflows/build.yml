@@ -1,4 +1,4 @@
-name: Build SDM660 Kernel (Fixed)
+name: Build SDM660 Kernel (GCC)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       branch:
         description: "Branch to build (e.g., r9/hmp)"
         required: true
-        default: "r9-hmp"
+        default: "r9/hmp"
       oc_gpu:
         description: "Enable GPU OC 700MHz?"
         required: true
@@ -26,30 +26,24 @@ jobs:
     steps:
       - name: Free up disk space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/local/lib/android /usr/share/swift
           sudo apt-get clean
           df -h
 
-      - name: Install build dependencies
+      - name: Install GCC toolchain
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential curl flex git gnupg gperf \
             libelf-dev libncurses5-dev libssl-dev lz4 \
             squashfs-tools xsltproc zip zlib1g-dev zstd \
-            python3 python3-pip \
-            clang llvm lld \
+            python3 \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi
-          clang --version
           aarch64-linux-gnu-gcc --version
 
-      - name: Checkout kernel source (shallow)
+      - name: Checkout kernel source
         uses: actions/checkout@v4
         with:
           repository: RyuujiX/android_kernel_asus_sdm660
@@ -66,36 +60,8 @@ jobs:
           echo "safe_branch=$SAFE_BRANCH" >> $GITHUB_OUTPUT
           if [ "${{ github.event.inputs.oc_gpu }}" == "true" ]; then
             echo "artifact_name=kernel-${SAFE_BRANCH}-gpu-oc" >> $GITHUB_OUTPUT
-            echo "ak_name=AnyKernel3-${SAFE_BRANCH}-gpu-oc" >> $GITHUB_OUTPUT
           else
             echo "artifact_name=kernel-${SAFE_BRANCH}" >> $GITHUB_OUTPUT
-            echo "ak_name=AnyKernel3-${SAFE_BRANCH}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Grep GPU validation
-        working-directory: kernel
-        run: |
-          echo "=== MAX_GPU_FREQ ==="
-          grep -rn "MAX_GPU_FREQ" drivers/gpu/msm/ || echo "[INFO] Not found"
-          echo ""
-          echo "=== overclock_gpu ==="
-          grep -rn "overclock_gpu" drivers/gpu/msm/ || echo "[INFO] Not found"
-          echo ""
-          echo "=== kgsl_pwrctrl.c gpu_freq ==="
-          grep -n "gpu_freq" drivers/gpu/msm/kgsl_pwrctrl.c | head -20 || true
-
-      - name: Patch adreno.c overclock_gpu
-        if: github.event.inputs.oc_gpu == 'true'
-        working-directory: kernel
-        run: |
-          ADRENO="drivers/gpu/msm/adreno.c"
-          if grep -q "overclock_gpu" "$ADRENO"; then
-            cp "$ADRENO" "$ADRENO.bak"
-            sed -i 's/overclock_gpu\s*=\s*0/overclock_gpu = 1/g' "$ADRENO"
-            sed -i 's/overclock_gpu\s*=\s*false/overclock_gpu = true/g' "$ADRENO"
-            grep -n "overclock_gpu" "$ADRENO" | head -5
-          else
-            echo "[WARN] overclock_gpu not found in adreno.c"
           fi
 
       - name: Patch GPU DT speed bin 90
@@ -103,74 +69,55 @@ jobs:
         working-directory: kernel
         run: |
           DT="arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi"
-          if [ ! -f "$DT" ]; then
-            DT=$(find arch/arm64/boot/dts/qcom/ -name "*gpu*" -type f | head -1)
-          fi
-          echo "[INFO] DT: $DT"
+          [ ! -f "$DT" ] && DT=$(find arch/arm64/boot/dts/qcom/ -name "*gpu*" -type f | head -1)
+          echo "DT: $DT"
           cp "$DT" "$DT.bak"
-          grep -n -A20 'qcom,speed-bin = <90>' "$DT" | head -30 || true
           sed -i '/qcom,speed-bin = <90>/,/qcom,gpu-pwrlevel@5/{s/585000000/700000000/g; s/588000000/700000000/g}' "$DT"
-          echo "[OK] Speed bin 90 patched to 700 MHz"
-          grep -n -A20 'qcom,speed-bin = <90>' "$DT" | head -30 || true
+          grep -n 'qcom,gpu-freq' "$DT" | head -15
 
       - name: Patch gpucc clock driver
         if: github.event.inputs.oc_gpu == 'true'
         working-directory: kernel
         run: |
           CLK="drivers/clk/qcom/gpucc-sdm660.c"
-          if [ ! -f "$CLK" ]; then
-            CLK=$(find drivers/clk/qcom/ -name "*gpu*660*" -type f | head -1)
-          fi
-          echo "[INFO] CLK: $CLK"
+          [ ! -f "$CLK" ] && CLK=$(find drivers/clk/qcom/ -name "*gpu*660*" -type f | head -1)
+          echo "CLK: $CLK"
           cp "$CLK" "$CLK.bak"
           if grep -q "700000000" "$CLK"; then
-            echo "[INFO] 700 MHz already present"
+            echo "700 MHz already present"
           else
             if grep -q "647000000" "$CLK"; then
               sed -i '/F_GFX(647000000,.*),/a\\tF_GFX(700000000, 0,  2, 0, 0, 1170000000),\n\\tF_GFX(750000000, 0,  2, 0, 0, 1170000000),' "$CLK"
-              echo "[OK] Inserted 700/750 MHz after 647 MHz"
             elif grep -q "588000000" "$CLK"; then
               sed -i '/F_GFX(588000000,.*),/a\\tF_GFX(647000000, 0,  2, 0, 0,  930000000),\n\\tF_GFX(700000000, 0,  2, 0, 0, 1170000000),\n\\tF_GFX(750000000, 0,  2, 0, 0, 1170000000),' "$CLK"
-              echo "[OK] Inserted 647/700/750 MHz after 588 MHz"
-            else
-              echo "[WARN] Neither 647 nor 588 MHz anchor found!"
             fi
           fi
-          grep -n "700000000" "$CLK" || echo "[WARN] 700 MHz not found!"
+          grep -n "700000000" "$CLK" || echo "WARN: 700 MHz not found"
 
-      - name: Build kernel
+      - name: Build kernel with GCC
         working-directory: kernel
         run: |
-          export CC="clang"
-          export CXX="clang++"
           export CROSS_COMPILE="aarch64-linux-gnu-"
           export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
-          export AR="llvm-ar"
-          export NM="llvm-nm"
-          export OBJCOPY="llvm-objcopy"
-          export STRIP="llvm-strip"
-          export LD="ld.lld"
+          export ARCH="arm64"
+          export SUBARCH="arm64"
 
-          make O=out ARCH=arm64 ${{ github.event.inputs.defconfig }}
+          make O=out ${{ github.event.inputs.defconfig }}
+          make O=out -j$(nproc --all) 2>&1 | tee build.log
 
-          make O=out ARCH=arm64 \
-            CC="$CC" CXX="$CXX" \
-            CROSS_COMPILE="$CROSS_COMPILE" \
-            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            AR="$AR" NM="$NM" \
-            OBJCOPY="$OBJCOPY" STRIP="$STRIP" LD="$LD" \
-            -j$(nproc --all) 2>&1 | tee build.log
+          echo "=== BUILD OUTPUT ==="
+          ls -lh out/arch/arm64/boot/ 2>/dev/null || echo "NO OUTPUT"
+          find out/ -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" 2>/dev/null | head -20
 
-      - name: Check build output
+      - name: Print last 50 lines of build log
+        if: always()
         working-directory: kernel
         run: |
-          df -h
-          echo ""
-          find out/ -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" | head -20
-          ls -lh out/arch/arm64/boot/ 2>/dev/null || true
-          grep -i "error:" build.log | grep -v "warning treated as error" | head -10 || echo "No critical errors"
+          echo "=== LAST 50 LINES ==="
+          tail -n 50 build.log
 
-      - name: Upload artifacts
+      - name: Upload kernel artifacts
+        if: hashFiles('kernel/out/arch/arm64/boot/Image.gz-dtb') != ''
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.safe_name.outputs.artifact_name }}
@@ -179,30 +126,4 @@ jobs:
             kernel/out/arch/arm64/boot/dtbo.img
             kernel/out/arch/arm64/boot/Image
             kernel/build.log
-            kernel/arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi.bak
-            kernel/arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi
-            kernel/drivers/clk/qcom/gpucc-sdm660.c.bak
-            kernel/drivers/clk/qcom/gpucc-sdm660.c
-            kernel/drivers/gpu/msm/adreno.c.bak
-            kernel/drivers/gpu/msm/adreno.c
-          if-no-files-found: warn
-          retention-days: 7
-
-      - name: Create AnyKernel3 zip
-        working-directory: kernel
-        run: |
-          if [ -d "AnyKernel3" ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ 2>/dev/null || true
-            cp out/arch/arm64/boot/dtbo.img AnyKernel3/ 2>/dev/null || true
-            cd AnyKernel3 && zip -r9 ../AnyKernel3.zip * -x .git README.md *placeholder* 2>/dev/null || true
-            cd ..
-          fi
-        continue-on-error: true
-
-      - name: Upload AnyKernel3
-        if: hashFiles('kernel/AnyKernel3.zip') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.safe_name.outputs.ak_name }}
-          path: kernel/AnyKernel3.zip
           retention-days: 7
