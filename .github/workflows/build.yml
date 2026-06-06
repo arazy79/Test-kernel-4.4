@@ -1,223 +1,300 @@
-name: "Build kernels"
-
-env:
-  CONFIGURATION: "repos.json"
+name: Build SDM660 Kernel with GPU OC
 
 on:
   workflow_dispatch:
     inputs:
-      pilihan_kernel:
-        description: 'Ketik nama kernel. Contoh: ElectroPerf, Project-Infinity-10, SkyWalker-r7'
+      branch:
+        description: "Branch to build (e.g., r9/hmp)"
         required: true
-        default: 'SkyWalker-r7-HMP'
-        type: string
+        default: "r9/hmp"
+      oc_gpu:
+        description: "Enable GPU OC 700MHz?"
+        required: true
+        default: "true"
+      oc_cpu:
+        description: "Enable CPU OC?"
+        required: true
+        default: "false"
+      defconfig:
+        description: "Defconfig file"
+        required: true
+        default: "sdm660-perf_defconfig"
+
+env:
+  ARCH: arm64
+  SUBARCH: arm64
+  CLANG_URL: "https://github.com/Neutron-Toolchains/clang-build-catalogue/releases/download/1803/Neutron-18.0.3.tar.zst"
+  CLANG_DIR: "${{ github.workspace }}/neutron-clang"
 
 jobs:
-  Set-repos:
-    name: "Parse repos.json"
-    runs-on: ubuntu-22.04
-    outputs:
-      repos: ${{ steps.generate-matrix.outputs.repos }}
+  build:
+    runs-on: ubuntu-latest
     steps:
-      - name: "Checkout"
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          swap-size-mb: 2048
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bc bison build-essential ccache curl \
+            flex g++-multilib gcc-multilib git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev \
+            liblz4-tool libncurses5-dev libssl-dev libxml2 libxml2-utils \
+            lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
+            zlib1g-dev zstd python3 python3-pip ninja-build
+
+      - name: Download & setup Neutron Clang
+        run: |
+          mkdir -p $CLANG_DIR
+          curl -L "$CLANG_URL" -o /tmp/neutron.tar.zst
+          tar --zstd -xf /tmp/neutron.tar.zst -C $CLANG_DIR --strip-components=1
+          rm /tmp/neutron.tar.zst
+          echo "CLANG_PATH=$CLANG_DIR/bin" >> $GITHUB_ENV
+          $CLANG_DIR/bin/clang --version
+
+      - name: Checkout kernel source
         uses: actions/checkout@v4
+        with:
+          repository: RyuujiX/android_kernel_asus_sdm660
+          ref: ${{ github.event.inputs.branch }}
+          submodules: recursive
+          fetch-depth: 1
+          path: kernel
 
-      - name: "List available kernels"
-        id: list-kernels
+      - name: Grep GPU validation & MAX_GPU_FREQ
+        working-directory: kernel
         run: |
-          echo "=== Kernel yang tersedia di repos.json ==="
-          cat ${{ env.CONFIGURATION }} | jq -r '.[].kernelSource.name'
-          echo "=========================================="
+          echo "========================================"
+          echo " 1. Cari MAX_GPU_FREQ macro"
+          echo "========================================"
+          grep -rn "MAX_GPU_FREQ" drivers/gpu/msm/ || echo "[INFO] MAX_GPU_FREQ tidak ditemukan (macro mungkin inline atau tidak ada)"
 
-      - name: "Generate Matrix"
-        id: generate-matrix
+          echo ""
+          echo "========================================"
+          echo " 2. Cari validasi gpu_freq > limit"
+          echo "========================================"
+          grep -rn "gpu_freq.*>" drivers/gpu/msm/ | grep -iE "max|limit|EINVAL" || echo "[INFO] Tidak ada validasi hard limit di gpu_freq"
+
+          echo ""
+          echo "========================================"
+          echo " 3. kgsl_pwrctrl.c - gpu_freq lines"
+          echo "========================================"
+          grep -n "gpu_freq" drivers/gpu/msm/kgsl_pwrctrl.c | head -50 || true
+
+          echo ""
+          echo "========================================"
+          echo " 4. adreno.c - gpu_freq lines"
+          echo "========================================"
+          grep -n "gpu_freq" drivers/gpu/msm/adreno.c | head -50 || true
+
+          echo ""
+          echo "========================================"
+          echo " 5. kgsl_pwrctrl.h - KGSL_MAX_PWRLEVELS"
+          echo "========================================"
+          grep -n "KGSL_MAX_PWRLEVELS\|MAX_GPU" drivers/gpu/msm/kgsl_pwrctrl.h || true
+
+      - name: Patch GPU OC - Device Tree (speed bin 90)
+        if: github.event.inputs.oc_gpu == 'true'
+        working-directory: kernel
         run: |
-          INPUT="${{ github.event.inputs.pilihan_kernel }}"
+          DT_FILE="arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi"
 
-          # Cek apakah nama kernel ada di repos.json
-          FOUND=$(cat ${{ env.CONFIGURATION }} | jq --arg name "$INPUT" '[.[] | select(.kernelSource.name == $name)] | length')
-          if [ "$FOUND" -eq 0 ]; then
-            echo "❌ ERROR: Kernel '$INPUT' tidak ditemukan di repos.json!"
-            echo "📋 Kernel yang tersedia:"
-            cat ${{ env.CONFIGURATION }} | jq -r '.[].kernelSource.name' | sed 's/^/   - /'
-            exit 1
+          if [ ! -f "$DT_FILE" ]; then
+            echo "[WARN] $DT_FILE tidak ditemukan, cari file GPU DT lain..."
+            find arch/arm64/boot/dts/qcom/ -name "*gpu*" -type f
+            DT_FILE=$(find arch/arm64/boot/dts/qcom/ -name "*gpu*" -type f | head -1)
           fi
-          echo "✅ Kernel '$INPUT' ditemukan, mulai build..."
-          echo "repos<<EOF" >> $GITHUB_OUTPUT
-          cat ${{ env.CONFIGURATION }} | jq --arg name "$INPUT" '[.[] | select(.kernelSource.name == $name)]' >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
-  Build-Kernel:
-    name: "Build kernel"
-    runs-on: ubuntu-22.04
-    needs:
-      - Set-repos
-    strategy:
-      max-parallel: 2
-      fail-fast: false
-      matrix:
-        repos: ${{ fromJSON(needs.Set-repos.outputs.repos) }}
-    env:
-      kernelDir: ${{ matrix.repos.kernelSource.name }}_${{ matrix.repos.kernelSource.device }}
-      kernelName: ${{ matrix.repos.kernelSource.name }}
-      kernelRepo: ${{ matrix.repos.kernelSource.repo }}
-      kernelBranch: ${{ matrix.repos.kernelSource.branch }}
-      kernelDevice: ${{ matrix.repos.kernelSource.device }}
-      DEFCONFIG_NAME: ${{ matrix.repos.kernelSource.defconfig }}
-      AK3_REPO: ${{ matrix.repos.AnyKernel3.repo }}
-      AK3_BRANCH: ${{ matrix.repos.AnyKernel3.branch }}
-      withKernelSU: ${{ matrix.repos.withKernelSU }}
+          echo "[INFO] Target DT file: $DT_FILE"
+          cp "$DT_FILE" "$DT_FILE.bak"
 
-    steps:
-      - name: "Create working dir"
-        run: mkdir -p $kernelDir
+          echo "[INFO] DT sebelum patch (speed bin 90 area):"
+          grep -n -A30 "qcom,speed-bin = <90>" "$DT_FILE" | head -40 || true
 
-      - name: "Install prerequisites"
+          python3 << 'PYEOF'
+          import re
+
+          dt_file = "arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi"
+          with open(dt_file, 'r') as f:
+              content = f.read()
+
+          speed_bin_90_pos = content.find("qcom,speed-bin = <90>")
+          if speed_bin_90_pos == -1:
+              print("[WARN] speed-bin = <90> tidak ditemukan!")
+              exit(1)
+
+          block_start = content.rfind("qcom,gpu-pwrlevels", 0, speed_bin_90_pos)
+          block_end = content.find("};", speed_bin_90_pos)
+          block_end = content.find("};", block_end + 1)
+
+          block = content[block_start:block_end+2]
+          print("[INFO] Block ditemukan, length:", len(block))
+
+          patched_block = block.replace("qcom,gpu-freq = <585000000>;", "qcom,gpu-freq = <700000000>;")
+          patched_block = patched_block.replace("qcom,gpu-freq = <588000000>;", "qcom,gpu-freq = <700000000>;")
+
+          content = content[:block_start] + patched_block + content[block_end+2:]
+
+          with open(dt_file, 'w') as f:
+              f.write(content)
+
+          print("[OK] Speed bin 90 patched: 585/588 MHz -> 700 MHz")
+          PYEOF
+
+          echo ""
+          echo "[INFO] DT setelah patch (speed bin 90 area):"
+          grep -n -A30 "qcom,speed-bin = <90>" "$DT_FILE" | head -40 || true
+
+      - name: Patch GPU OC - Clock Driver (gpucc-sdm660.c)
+        if: github.event.inputs.oc_gpu == 'true'
+        working-directory: kernel
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential bc curl git zip gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev lftp zstd wget libfl-dev python3 libarchive-tools
+          CLK_FILE="drivers/clk/qcom/gpucc-sdm660.c"
 
-      - name: "Clone kernel source"
-        working-directory: ./${{ env.kernelDir }}
-        run: |
-          git clone --recursive --branch $kernelBranch $kernelRepo $kernelName --depth=1
-
-      - name: "Get toolchains"
-        working-directory: ./${{ env.kernelDir }}
-        env:
-          toolchains: "${{ toJSON(matrix.repos.toolchains) }}"
-        run: |
-          toolchains_num="$(echo $toolchains | jq 'length')"
-          echo $toolchains_num
-          for ((i=0;i<toolchains_num;i++)); do
-            name=$(echo $toolchains | jq -r ".[$i].name")
-            repo=$(echo $toolchains | jq -r ".[$i].repo")
-            branch=$(echo $toolchains | jq -r ".[$i].branch")
-            git clone --recursive --branch $branch $repo $name --depth=1
-            echo "$(pwd)/$name/" >> $GITHUB_PATH
-            echo "$(pwd)/$name/bin" >> $GITHUB_PATH
-          done
-          echo "PATH Variable: $PATH"
-
-      - name: "Set args"
-        id: generate-args
-        working-directory: ./${{ env.kernelDir }}
-        env:
-          params: "${{ toJSON(matrix.repos.params) }}"
-        run: |
-          echo "PATH Variable: $PATH"
-          ARCH=$(echo $params | jq -r ".ARCH")
-          CROSS_COMPILE=$(echo $params | jq -r ".CROSS_COMPILE")
-          CROSS_COMPILE_COMPAT=$(echo $params | jq -r ".CROSS_COMPILE_COMPAT")
-          CROSS_COMPILE_ARM32=$(echo $params | jq -r ".CROSS_COMPILE_ARM32")
-          CLANG_TRIPLE=$(echo $params | jq -r ".CLANG_TRIPLE")
-          AR=$(echo $params | jq -r ".AR")
-          CC=$(echo $params | jq -r ".CC")
-          echo "ARCH=$ARCH" >> $GITHUB_ENV
-          args="-j$(nproc --all) O=out"
-          if [ -n "$ARCH" ] && [ "$ARCH" != "null" ]; then
-            args="$args ARCH=$ARCH"
+          if [ ! -f "$CLK_FILE" ]; then
+            echo "[WARN] $CLK_FILE tidak ditemukan, cari alternatif..."
+            find drivers/clk/qcom/ -name "*gpu*" -type f
+            CLK_FILE=$(find drivers/clk/qcom/ -name "*gpu*660*" -type f | head -1)
           fi
-          if [ -n "$CROSS_COMPILE" ] && [ "$CROSS_COMPILE" != "null" ]; then
-            args="$args CROSS_COMPILE=$CROSS_COMPILE"
-          fi
-          if [ -n "$CLANG_TRIPLE" ] && [ "$CLANG_TRIPLE" != "null" ]; then
-            args="$args CLANG_TRIPLE=$CLANG_TRIPLE"
-          fi
-          if [ -n "$CROSS_COMPILE_COMPAT" ] && [ "$CROSS_COMPILE_COMPAT" != "null" ]; then
-            args="$args CROSS_COMPILE_ARM32=$CROSS_COMPILE_COMPAT"
-          fi
-          if [ -n "$AR" ] && [ "$AR" != "null" ]; then
-            args="$args AR=$AR"
-          fi
-          if [ -n "$CC" ] && [ "$CC" != "null" ]; then
-            args="$args CC=$CC"
-          fi
-          echo "args=$args" >> $GITHUB_OUTPUT
 
-      - name: "Update KernelSU"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        if: ${{ env.withKernelSU == 'true' }}
+          echo "[INFO] Target clock file: $CLK_FILE"
+          cp "$CLK_FILE" "$CLK_FILE.bak"
+
+          echo "[INFO] ftbl_gfx3d_clk_src sebelum patch:"
+          grep -n "F_GFX.*700000000\|F_GFX.*750000000" "$CLK_FILE" || echo "[INFO] 700/750 MHz belum ada di freq table"
+
+          python3 << 'PYEOF'
+          import re
+
+          clk_file = "drivers/clk/qcom/gpucc-sdm660.c"
+          with open(clk_file, 'r') as f:
+              content = f.read()
+
+          if "700000000" in content:
+              print("[INFO] 700 MHz sudah ada di freq table, skip patch clock driver")
+          else:
+              pattern = r'(F_GFX\(647000000,.*?\),)'
+              match = re.search(pattern, content)
+              if match:
+                  insert_pos = match.end()
+                  new_lines = """\n\tF_GFX(700000000, 0,  2, 0, 0, 1170000000),\n\tF_GFX(750000000, 0,  2, 0, 0, 1170000000),"""
+                  content = content[:insert_pos] + new_lines + content[insert_pos:]
+                  print("[OK] Inserted 700 MHz & 750 MHz ke ftbl_gfx3d_clk_src")
+              else:
+                  pattern2 = r'(F_GFX\(588000000,.*?\),)'
+                  match2 = re.search(pattern2, content)
+                  if match2:
+                      insert_pos = match2.end()
+                      new_lines = """\n\tF_GFX(647000000, 0,  2, 0, 0,  930000000),\n\tF_GFX(700000000, 0,  2, 0, 0, 1170000000),\n\tF_GFX(750000000, 0,  2, 0, 0, 1170000000),"""
+                      content = content[:insert_pos] + new_lines + content[insert_pos:]
+                      print("[OK] Inserted 647/700/750 MHz ke ftbl_gfx3d_clk_src")
+                  else:
+                      print("[WARN] Tidak bisa menemukan anchor untuk patch freq table!")
+
+              with open(clk_file, 'w') as f:
+                  f.write(content)
+
+          if "ftbl_gfx3d_clk_src_630" in content:
+              if "700000000" not in content.split("ftbl_gfx3d_clk_src_630")[1].split("};")[0]:
+                  print("[INFO] ftbl_gfx3d_clk_src_630 perlu patch juga, tapi skip untuk sekarang")
+          PYEOF
+
+          echo ""
+          echo "[INFO] ftbl_gfx3d_clk_src setelah patch:"
+          grep -n "F_GFX.*700000000\|F_GFX.*750000000" "$CLK_FILE" || echo "[WARN] 700/750 MHz masih belum ada!"
+
+      - name: Patch CPU OC (cmdline)
+        if: github.event.inputs.oc_cpu == 'true'
+        working-directory: kernel
         run: |
-          if [ -d "./KernelSU" ]; then rm -rf "./KernelSU"; fi
-          if [ -d "./drivers/kernelsu" ]; then rm -rf "./drivers/kernelsu"; fi
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-          echo -e "\nCONFIG_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_HAVE_KPROBES=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
-          echo -e "\nCONFIG_KPROBE_EVENTS=y" >> ./arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG_NAME }}
+          echo "[INFO] CPU OC diaktifkan via cmdline: overclock.cpu=1"
 
-      - name: "Make defconfig"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ github.event.inputs.branch }}-${{ github.event.inputs.oc_gpu }}-${{ github.event.inputs.oc_cpu }}
+          max-size: 5G
+
+      - name: Build kernel
+        working-directory: kernel
         run: |
-          echo "PATH Variable: $PATH"
-          make ${{ env.args }} ${{ env.DEFCONFIG_NAME }}
+          export PATH="$CLANG_PATH:$PATH"
+          export CC="ccache clang"
+          export CXX="ccache clang++"
+          export CROSS_COMPILE="aarch64-linux-gnu-"
+          export CROSS_COMPILE_ARM32="arm-linux-gnueabi-"
+          export AR="llvm-ar"
+          export NM="llvm-nm"
+          export OBJCOPY="llvm-objcopy"
+          export OBJDUMP="llvm-objdump"
+          export STRIP="llvm-strip"
+          export LD="ld.lld"
 
-      - name: "Build kernel"
-        working-directory: ./${{ env.kernelDir }}/${{ env.kernelName }}
-        env:
-          args: ${{ steps.generate-args.outputs.args }}
+          make O=out ARCH=arm64 ${{ github.event.inputs.defconfig }}
+
+          make O=out ARCH=arm64 \
+            CC="$CC" \
+            CXX="$CXX" \
+            CROSS_COMPILE="$CROSS_COMPILE" \
+            CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            AR="$AR" \
+            NM="$NM" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            STRIP="$STRIP" \
+            LD="$LD" \
+            -j$(nproc --all) 2>&1 | tee build.log
+
+      - name: Check build output
+        working-directory: kernel
         run: |
-          echo "PATH Variable: $PATH"
-          make ${{ env.args }} dtbs
-          rm -f out/arch/${{ env.ARCH }}/boot/Image.gz-dtb
-          make ${{ env.args }} Image.gz-dtb
-          echo "=== Build complete ==="
-          ls -la out/arch/${{ env.ARCH }}/boot/
+          echo "[INFO] Build output files:"
+          find out/ -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" | head -20
 
-      - name: "Upload Image"
+          ls -lh out/arch/arm64/boot/ || true
+
+          if grep -i "error:" build.log | grep -v "warning treated as error" | head -5; then
+            echo "[WARN] Ada error di build log!"
+          fi
+
+      - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Image(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/Image
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload Image.gz"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/Image.gz
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload Image.gz-dtb"
-        uses: actions/upload-artifact@v4
-        with:
-          name: Image.gz-dtb(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/Image.gz-dtb
+          name: kernel-${{ github.event.inputs.branch }}${{ github.event.inputs.oc_gpu == 'true' && '-gpu-oc' || '' }}${{ github.event.inputs.oc_cpu == 'true' && '-cpu-oc' || '' }}
+          path: |
+            kernel/out/arch/arm64/boot/Image.gz-dtb
+            kernel/out/arch/arm64/boot/dtbo.img
+            kernel/out/arch/arm64/boot/Image
+            kernel/build.log
+            kernel/arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi.bak
+            kernel/arch/arm64/boot/dts/qcom/sdm660-gpu.dtsi
+            kernel/drivers/clk/qcom/gpucc-sdm660.c.bak
+            kernel/drivers/clk/qcom/gpucc-sdm660.c
           if-no-files-found: warn
           retention-days: 7
 
-      - name: "Package AnyKernel3"
+      - name: Upload AnyKernel3 flashable (optional)
+        if: hashFiles('kernel/AnyKernel3/**') != ''
+        working-directory: kernel
         run: |
-          AK3_DIR="${{ github.workspace }}/AK3"
-          git clone --depth=1 $AK3_REPO -b $AK3_BRANCH "$AK3_DIR"
-          cp ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/Image.gz-dtb "$AK3_DIR/"
-          cd "$AK3_DIR" && zip -r9 ${{ github.workspace }}/kernel-${{ env.kernelDevice }}.zip . -x ".git*"
+          if [ -d "AnyKernel3" ]; then
+            echo "[INFO] AnyKernel3 detected, buat zip flashable..."
+            cp out/arch/arm64/boot/Image.gz-dtb AnyKernel3/ || true
+            cp out/arch/arm64/boot/dtbo.img AnyKernel3/ || true
+            cd AnyKernel3 && zip -r9 ../AnyKernel3.zip * -x .git README.md *placeholder*
+            cd ..
+          fi
+        continue-on-error: true
 
-      - name: "Upload AnyKernel3 zip"
+      - name: Upload AnyKernel3 zip
+        if: hashFiles('kernel/AnyKernel3.zip') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ${{ github.workspace }}/kernel-${{ env.kernelDevice }}.zip
-          if-no-files-found: ignore
+          name: AnyKernel3-${{ github.event.inputs.branch }}${{ github.event.inputs.oc_gpu == 'true' && '-gpu-oc' || '' }}
+          path: kernel/AnyKernel3.zip
           retention-days: 7
-
-      - name: "Upload dtb"
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtb(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/dtb
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: "Upload dtbo.img"
-        uses: actions/upload-artifact@v4
-        with:
-          name: dtbo.img(${{ env.kernelDevice }}-${{ env.kernelName }})
-          path: ./${{ env.kernelDir }}/${{ env.kernelName }}/out/arch/${{ env.ARCH }}/boot/dtbo.img
-          if-no-files-found: ignore
-          retention-days: 7
-
